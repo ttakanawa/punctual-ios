@@ -29,6 +29,15 @@ public actor RetainedCloudSyncService: CKSyncEngineDelegate {
         self.accountScope = accountScope
     }
 
+    /// A regular Task inherits CloudKit's delegate task-local context, even after the
+    /// callback returns. Engine operations must not inherit that reentrancy guard.
+    @discardableResult
+    nonisolated static func runOutsideEngineCallback(
+        _ operation: @escaping @Sendable () async -> Void
+    ) -> Task<Void, Never> {
+        Task.detached(operation: operation)
+    }
+
     public func start() async {
         if observation == nil {
             networkMonitor.pathUpdateHandler = { [weak self] path in
@@ -69,9 +78,9 @@ public actor RetainedCloudSyncService: CKSyncEngineDelegate {
             synchronizing = false
             if refreshRequested {
                 refreshRequested = false
-                Task { [weak self] in await self?.refresh() }
+                Self.runOutsideEngineCallback { [weak self] in await self?.refresh() }
             } else {
-                Task { [weak self] in await self?.localDataChanged() }
+                Self.runOutsideEngineCallback { [weak self] in await self?.localDataChanged() }
             }
         }
         var attempt = generation
@@ -172,21 +181,25 @@ public actor RetainedCloudSyncService: CKSyncEngineDelegate {
     }
 
     public func suspendForAccountChange() async {
+        await invalidateAccount()
+        await refresh()
+    }
+
+    private func invalidateAccount() async {
         _ = try? await repository.checkAccount(nil)
         await stopEngine()
-        await refresh()
     }
 
     private func stopEngine() async {
         generation &+= 1
-        await finishImport()
         let previous = engine
         engine = nil
         boundAccount = nil
         lastScheduled = []
+        await finishImport()
         // Cancellation can complete after delegate events. Invalidate identity first and
         // avoid waiting for the engine from inside its own async delegate callback.
-        Task { await previous?.cancelOperations() }
+        Self.runOutsideEngineCallback { await previous?.cancelOperations() }
     }
 
     private func localDataChanged() async {
@@ -208,13 +221,17 @@ public actor RetainedCloudSyncService: CKSyncEngineDelegate {
         do {
             switch event {
             case .accountChange(let change):
+                let accountChanged: Bool
                 switch change.changeType {
                 case .signIn(let currentUser):
-                    if "\(accountScope)/\(currentUser.recordName)" != account {
-                        await suspendForAccountChange()
-                    }
-                case .signOut, .switchAccounts: await suspendForAccountChange()
-                @unknown default: await suspendForAccountChange()
+                    accountChanged = "\(accountScope)/\(currentUser.recordName)" != account
+                case .signOut, .switchAccounts: accountChanged = true
+                @unknown default: accountChanged = true
+                }
+                if accountChanged {
+                    await invalidateAccount()
+                    // Return to CloudKit without waiting for fetch/send to deliver more events.
+                    Self.runOutsideEngineCallback { [weak self] in await self?.refresh() }
                 }
             case .stateUpdate(let update):
                 try await repository.saveEngineState(
