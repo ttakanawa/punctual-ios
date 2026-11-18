@@ -1,0 +1,21 @@
+{
+  "repository": "ttakanawa/punctual-ios",
+  "project": "NotificationManager.xcodeproj",
+  "scheme": "NotificationManager",
+  "platform": "IOS",
+  "actionTypes": ["ARCHIVE"],
+  "startConditions": {
+    "branchStartCondition": null,
+    "tagStartCondition": null,
+    "pullRequestStartCondition": null,
+    "scheduledStartCondition": null,
+    "manualBranchStartCondition": {
+      "source": {
+        "isAllMatch": false,
+        "patterns": [{ "pattern": "main", "isPrefix": false }]
+      }
+    },
+    "manualPullRequestStartCondition": null,
+    "manualTagStartCondition": null
+  }
+}

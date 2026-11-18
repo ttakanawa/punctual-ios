@@ -8,16 +8,17 @@ final class AlarmKitTrialUITests: XCTestCase {
         openTrial(in: app)
 
         let message = app.textFields["alarmkit-trial.message"]
-        XCTAssertEqual(message.value as? String, "通知時刻です")
-        XCTAssertTrue(app.buttons["alarmkit-trial.start"].isEnabled)
+        let defaultMessage = "通知時刻です"
+        let start = app.buttons["alarmkit-trial.start"]
+        XCTAssertEqual(message.value as? String, defaultMessage)
+        XCTAssertTrue(start.isEnabled)
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = "alarmkit-trial-japanese"
         screenshot.lifetime = .keepAlways
         add(screenshot)
 
-        message.tap()
-        message.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 6))
-        XCTAssertFalse(app.buttons["alarmkit-trial.start"].isEnabled)
+        clearTrialMessage(message)
+        XCTAssertTrue(start.wait(for: \.isEnabled, toEqual: false, timeout: 3))
     }
 
     @MainActor
@@ -87,32 +88,49 @@ final class AlarmKitTrialUITests: XCTestCase {
     @MainActor
     private func stopTrial(in app: XCUIApplication) {
         let cancel = app.buttons["alarmkit-trial.cancel"]
-        if cancel.isEnabled { cancel.tap() }
+        if cancel.isEnabled { tapTrialAction(cancel) }
     }
 
     @MainActor
     private func startTrial(in app: XCUIApplication, duration: String) {
         let message = app.textFields["alarmkit-trial.message"]
-        let initial = message.value as? String ?? ""
-        message.tap()
-        message.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: initial.count))
+        clearTrialMessage(message)
         message.typeText("AlarmKit offline trial")
+        XCTAssertEqual(message.value as? String, "AlarmKit offline trial")
         if app.keyboards.buttons["Return"].exists { app.keyboards.buttons["Return"].tap() }
 
         app.buttons["alarmkit-trial.duration"].tap()
-        app.buttons[duration].tap()
-        app.buttons["alarmkit-trial.start"].tap()
+        let durationOption = app.buttons[duration]
+        durationOption.tap()
+        XCTAssertTrue(durationOption.waitForNonExistence(timeout: 5))
+        let start = app.buttons["alarmkit-trial.start"]
+        XCTAssertTrue(start.wait(for: \.isEnabled, toEqual: true, timeout: 5))
+        tapTrialAction(start)
 
         // The simulator's system language can differ from the app's test language.
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         let allow = springboard.buttons.matching(
             NSPredicate(format: "label == 'Allow' OR label == '許可'")
         ).firstMatch
-        if allow.waitForExistence(timeout: 3) { allow.tap() }
+        if allow.waitForExistence(timeout: 8) { allow.tap() }
         let status = app.staticTexts["alarmkit-trial.status"]
         let scheduled = NSPredicate(format: "label == 'Timer scheduled. Close the app to test it.'")
         expectation(for: scheduled, evaluatedWith: status)
-        waitForExpectations(timeout: 5)
+        waitForExpectations(timeout: 10)
+    }
+
+    @MainActor
+    private func clearTrialMessage(_ field: XCUIElement) {
+        let initial = field.value as? String ?? ""
+        // Place the caret after the current message before sending backspaces.
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: initial.count))
+    }
+
+    @MainActor
+    private func tapTrialAction(_ button: XCUIElement) {
+        // Tap the leading label within the full-width form row on iPad.
+        button.coordinate(withNormalizedOffset: CGVector(dx: 0.17, dy: 0.5)).tap()
     }
 
     @MainActor

@@ -79,7 +79,7 @@ expect_failure() {
         echo "Distribution validation unexpectedly passed: $scenario" >&2
         exit 1
     fi
-    if ! rg -F "$diagnostic" "$output_file" >/dev/null; then
+    if ! grep -F "$diagnostic" "$output_file" >/dev/null; then
         echo "Expected distribution diagnostic was not emitted: $scenario" >&2
         cat "$output_file" >&2
         exit 1

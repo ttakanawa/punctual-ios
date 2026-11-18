@@ -1,2 +1,7 @@
 [tools]
+node = "24.22.2"
+shellcheck = "0.11.0"
 swiftlint = "0.65.0"
+
+[settings]
+auto_install = false

@@ -6,8 +6,10 @@ let package = Package(
     platforms: [.iOS(.v18), .macOS(.v15)],
     products: [
         .library(name: "NotificationManagerDomain", targets: ["NotificationManagerDomain"]),
-        .library(name: "NotificationManagerApplication", targets: ["NotificationManagerApplication"]),
-        .library(name: "NotificationManagerPersistence", targets: ["NotificationManagerPersistence"]),
+        .library(
+            name: "NotificationManagerApplication", targets: ["NotificationManagerApplication"]),
+        .library(
+            name: "NotificationManagerPersistence", targets: ["NotificationManagerPersistence"]),
         .library(
             name: "NotificationManagerWidgetSupport",
             targets: ["NotificationManagerWidgetSupport"]
@@ -15,7 +17,8 @@ let package = Package(
     ],
     targets: [
         .target(name: "NotificationManagerDomain"),
-        .target(name: "NotificationManagerApplication", dependencies: ["NotificationManagerDomain"]),
+        .target(
+            name: "NotificationManagerApplication", dependencies: ["NotificationManagerDomain"]),
         .target(
             name: "NotificationManagerPersistence",
             dependencies: ["NotificationManagerDomain", "NotificationManagerApplication"]

@@ -707,16 +707,16 @@ private actor AppEnvironmentWidgetPublicationRecorder {
         buffered.append(publication)
     }
 
-    func next(timeout: Duration = .seconds(1)) async throws -> AppEnvironmentWidgetPublication {
+    func next(timeout: Duration = .seconds(15)) async throws -> AppEnvironmentWidgetPublication {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
-        while clock.now < deadline {
-            if !buffered.isEmpty {
-                return buffered.removeFirst()
+        while buffered.isEmpty {
+            guard clock.now < deadline else {
+                throw WidgetPublicationRecorderError.timedOut
             }
             try await Task.sleep(for: .milliseconds(10))
         }
-        throw WidgetPublicationRecorderError.timedOut
+        return buffered.removeFirst()
     }
 }
 
