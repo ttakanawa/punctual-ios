@@ -1,0 +1,40 @@
+name: TestFlight
+
+on: workflow_dispatch
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency: xcode-cloud
+
+jobs:
+  start:
+    if: >-
+      github.repository == 'ttakanawa/punctual-ios' &&
+      github.ref == 'refs/heads/main' &&
+      github.actor == 'ttakanawa' &&
+      github.triggering_actor == 'ttakanawa'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: appstore-connect
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version-file: mise.toml
+          package-manager-cache: false
+      - name: Check CI for the dispatch commit
+        env:
+          GITHUB_ACTIONS_READ_TOKEN: ${{ github.token }}
+        run: sh ci_scripts/require-main-ci.sh "$GITHUB_SHA"
+      - name: Start Xcode Cloud
+        env:
+          XCODE_CLOUD_WORKFLOW_ID: ${{ vars.XCODE_CLOUD_WORKFLOW_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ vars.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_ID: ${{ vars.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+        run: node Scripts/xcode-cloud.mjs start

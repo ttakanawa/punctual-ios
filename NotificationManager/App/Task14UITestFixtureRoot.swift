@@ -8,17 +8,23 @@
 
     @MainActor
     struct Task14UITestFixtureRoot: View {
+        @Environment(\.timeZone) private var deviceTimeZone
         @State private var router: AppRouter
         @State private var listModel: ReminderListModel
+        private let fixtureTimeZone: TimeZone?
 
         init(arguments: [String] = ProcessInfo.processInfo.arguments) {
             let composition = Task14UITestFixtureComposition.make(arguments: arguments)
             _router = State(initialValue: composition.router)
             _listModel = State(initialValue: composition.listModel)
+            fixtureTimeZone = arguments.firstIndex(of: "-ui-time-zone")
+                .flatMap { arguments.dropFirst($0 + 1).first }
+                .flatMap(TimeZone.init(identifier:))
         }
 
         var body: some View {
             AdaptiveRootView(router: router, listModel: listModel)
+                .environment(\.timeZone, fixtureTimeZone ?? deviceTimeZone)
         }
     }
 
@@ -508,7 +514,8 @@
                 return .saved(draft.id)
             },
             delete: { _ in
-                try? await Task.sleep(for: .seconds(2))
+                // Leave time for XCTest to observe the disabled Back button under CI load.
+                try? await Task.sleep(for: .seconds(10))
             }
         )
 

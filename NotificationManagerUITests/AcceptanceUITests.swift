@@ -6,7 +6,7 @@ final class AcceptanceUITests: XCTestCase {
     func testReminderRowShowsOnlyCompactReminderInformation() {
         let app = launchAcceptanceFixture(
             scenario: "navigation",
-            arguments: englishManilaArguments
+            arguments: englishArguments + ["-ui-time-zone", "Asia/Manila"]
         )
         let row = app.buttons["reminder-row.aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"]
 
@@ -23,10 +23,11 @@ final class AcceptanceUITests: XCTestCase {
         let times = app.descendants(matching: .any)["reminder-row.times"]
         let dayOffset = app.descendants(matching: .any)["reminder-row.day-offset"]
         let recurrence = app.descendants(matching: .any)["reminder-row.recurrence"]
+        let scheduleLabel = times.label.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         XCTAssertTrue(compactSchedule.exists)
-        XCTAssertTrue(times.label.localizedCaseInsensitiveContains("9:50 AM"), times.label)
-        XCTAssertTrue(times.label.localizedCaseInsensitiveContains("9:50 PM"), times.label)
-        XCTAssertTrue(times.label.localizedCaseInsensitiveContains("EDT"), times.label)
+        XCTAssertTrue(scheduleLabel.hasPrefix("9:50 AM"), times.label)
+        XCTAssertTrue(scheduleLabel.localizedCaseInsensitiveContains("9:50 PM"), times.label)
+        XCTAssertTrue(scheduleLabel.localizedCaseInsensitiveContains("EDT"), times.label)
         XCTAssertEqual(dayOffset.label, "1 day ago")
         XCTAssertEqual(recurrence.label, "Repeat")
         XCTAssertEqual(recurrence.value as? String, "Every week")
@@ -48,7 +49,7 @@ final class AcceptanceUITests: XCTestCase {
     func testRecurringReminderKeepsRepeatSummaryWhenNoNextAlertExists() {
         let app = launchAcceptanceFixture(
             scenario: "enabled-capacity",
-            arguments: englishManilaArguments
+            arguments: englishArguments
         )
         let row = app.buttons["reminder-row.ffffffff-ffff-ffff-ffff-ffffffffffff"]
 
@@ -74,7 +75,7 @@ final class AcceptanceUITests: XCTestCase {
     func testTimeZoneFilterShowsOnlyMatchingConfiguredReminder() {
         let app = launchAcceptanceFixture(
             scenario: "time-zone-filter",
-            arguments: englishManilaArguments
+            arguments: englishArguments
         )
         let newYork = app.buttons[
             "reminder-row.aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -114,7 +115,7 @@ final class AcceptanceUITests: XCTestCase {
     func testTagChipsScrollHorizontallyAndFilterReminders() {
         let app = launchAcceptanceFixture(
             scenario: "tag-filter",
-            arguments: englishManilaArguments
+            arguments: englishArguments
         )
         let scrollView = app.scrollViews["reminder.tag-filter.scroll"]
         let allTags = app.buttons["reminder.tag-filter.all"]
@@ -141,13 +142,10 @@ final class AcceptanceUITests: XCTestCase {
 
         XCTAssertTrue(tech.waitForExistence(timeout: 1))
         let initialTechMinX = tech.frame.minX
-        for _ in 0..<8 {
-            if tech.isHittable {
-                break
-            }
-            scrollView.swipeLeft(velocity: .fast)
+        guard scrollTagIntoView(tech, in: scrollView, app: app) else {
+            XCTFail("Tech tag did not become visible in the horizontal filter.")
+            return
         }
-        XCTAssertTrue(tech.isHittable)
         XCTAssertLessThan(tech.frame.minX, initialTechMinX)
         tech.tap()
 
@@ -157,13 +155,10 @@ final class AcceptanceUITests: XCTestCase {
 
         XCTAssertTrue(allTags.waitForExistence(timeout: 1))
         let scrolledAllTagsMaxX = allTags.frame.maxX
-        for _ in 0..<8 {
-            if allTags.isHittable {
-                break
-            }
-            scrollView.swipeRight(velocity: .fast)
+        guard scrollTagIntoView(allTags, in: scrollView, app: app) else {
+            XCTFail("All Tags did not become visible in the horizontal filter.")
+            return
         }
-        XCTAssertTrue(allTags.isHittable)
         XCTAssertGreaterThan(allTags.frame.maxX, scrolledAllTagsMaxX)
         allTags.tap()
 
@@ -179,7 +174,7 @@ final class AcceptanceUITests: XCTestCase {
             arguments: [
                 "-AppleLanguages", "(ja)",
                 "-AppleLocale", "ja_JP",
-                "-AppleTimeZone", "Asia/Manila",
+                "-ui-time-zone", "Asia/Manila",
                 "-UIPreferredContentSizeCategoryName",
                 "UICTContentSizeCategoryAccessibilityExtraExtraExtraLarge"
             ]
@@ -258,11 +253,57 @@ final class AcceptanceUITests: XCTestCase {
         return app
     }
 
-    private var englishManilaArguments: [String] {
+    @MainActor
+    private func scrollTagIntoView(
+        _ tag: XCUIElement,
+        in scrollView: XCUIElement,
+        app: XCUIApplication
+    ) -> Bool {
+        let windowFrame = app.windows.firstMatch.frame
+        for _ in 0..<12 {
+            let scrollFrame = scrollView.frame
+            let viewport = scrollFrame.intersection(windowFrame)
+            guard !viewport.isEmpty else { return false }
+            let tagFrame = tag.frame
+            if tag.isHittable, viewport.contains(CGPoint(x: tagFrame.midX, y: tagFrame.midY)) {
+                return true
+            }
+
+            let distance = abs(tagFrame.midX - viewport.midX)
+            let movingLeft = tagFrame.midX > viewport.midX
+            if distance > 2 * viewport.width {
+                if movingLeft {
+                    scrollView.swipeLeft()
+                } else {
+                    scrollView.swipeRight()
+                }
+                continue
+            }
+
+            let dragDistance = min(distance, viewport.width * 0.6)
+            let startX =
+                movingLeft
+                ? viewport.maxX - viewport.width * 0.15 : viewport.minX + viewport.width * 0.15
+            let endX = startX + (movingLeft ? -dragDistance : dragDistance)
+            let origin = scrollView.coordinate(withNormalizedOffset: .zero)
+            let start = origin.withOffset(
+                CGVector(
+                    dx: startX - scrollFrame.minX, dy: viewport.midY - scrollFrame.minY)
+            )
+            let end = origin.withOffset(
+                CGVector(
+                    dx: endX - scrollFrame.minX, dy: viewport.midY - scrollFrame.minY)
+            )
+            start.press(
+                forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.1)
+        }
+        return false
+    }
+
+    private var englishArguments: [String] {
         [
             "-AppleLanguages", "(en)",
-            "-AppleLocale", "en_US",
-            "-AppleTimeZone", "Asia/Manila"
+            "-AppleLocale", "en_US"
         ]
     }
 }

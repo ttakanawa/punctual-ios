@@ -30,7 +30,7 @@ assert_equal() {
 
 count_project_setting() {
     pattern=$1
-    rg -o "$pattern" "$project_file" | wc -l | tr -d ' '
+    grep -Eo "$pattern" "$project_file" | wc -l | tr -d ' '
 }
 
 info_json=$(plutil -convert json -o - "$info_plist")
@@ -609,9 +609,9 @@ printf '%s' "$app_icon_json" | jq -e \
     || fail "AppIcon Contents.json must contain one standard iOS 1024x1024 image"
 
 icon_metadata=$(sips -g pixelWidth -g pixelHeight -g hasAlpha "$app_icon")
-printf '%s' "$icon_metadata" | rg 'pixelWidth: 1024' >/dev/null || fail "AppIcon width must be 1024"
-printf '%s' "$icon_metadata" | rg 'pixelHeight: 1024' >/dev/null || fail "AppIcon height must be 1024"
-printf '%s' "$icon_metadata" | rg 'hasAlpha: no' >/dev/null || fail "AppIcon must not have an alpha channel"
+printf '%s' "$icon_metadata" | grep -F 'pixelWidth: 1024' >/dev/null || fail "AppIcon width must be 1024"
+printf '%s' "$icon_metadata" | grep -F 'pixelHeight: 1024' >/dev/null || fail "AppIcon height must be 1024"
+printf '%s' "$icon_metadata" | grep -F 'hasAlpha: no' >/dev/null || fail "AppIcon must not have an alpha channel"
 
 for alternate_name in $alternate_icon_names; do
     alternate_set="$asset_catalog/$alternate_name.appiconset"
@@ -627,11 +627,11 @@ for alternate_name in $alternate_icon_names; do
         >/dev/null || fail "$alternate_name Contents.json is invalid"
 
     alternate_metadata=$(sips -g pixelWidth -g pixelHeight -g hasAlpha "$alternate_image")
-    printf '%s' "$alternate_metadata" | rg 'pixelWidth: 1024' >/dev/null \
+    printf '%s' "$alternate_metadata" | grep -F 'pixelWidth: 1024' >/dev/null \
         || fail "$alternate_name width must be 1024"
-    printf '%s' "$alternate_metadata" | rg 'pixelHeight: 1024' >/dev/null \
+    printf '%s' "$alternate_metadata" | grep -F 'pixelHeight: 1024' >/dev/null \
         || fail "$alternate_name height must be 1024"
-    printf '%s' "$alternate_metadata" | rg 'hasAlpha: no' >/dev/null \
+    printf '%s' "$alternate_metadata" | grep -F 'hasAlpha: no' >/dev/null \
         || fail "$alternate_name must not have an alpha channel"
 done
 
@@ -649,9 +649,9 @@ for preview_name in $preview_names; do
         >/dev/null || fail "$preview_name Contents.json is invalid"
 
     preview_metadata=$(sips -g pixelWidth -g pixelHeight "$preview_image")
-    printf '%s' "$preview_metadata" | rg 'pixelWidth: 256' >/dev/null \
+    printf '%s' "$preview_metadata" | grep -F 'pixelWidth: 256' >/dev/null \
         || fail "$preview_name width must be 256"
-    printf '%s' "$preview_metadata" | rg 'pixelHeight: 256' >/dev/null \
+    printf '%s' "$preview_metadata" | grep -F 'pixelHeight: 256' >/dev/null \
         || fail "$preview_name height must be 256"
 done
 
@@ -667,7 +667,8 @@ printf '%s' "$privacy_json" | jq -e \
     '.NSPrivacyAccessedAPITypes == [{"NSPrivacyAccessedAPIType":"NSPrivacyAccessedAPICategoryUserDefaults","NSPrivacyAccessedAPITypeReasons":["CA92.1"]}]' >/dev/null \
     || fail "privacy manifest must declare only UserDefaults reason CA92.1"
 
-if rg -n 'registerForRemoteNotifications|didRegisterForRemoteNotifications|didFailToRegisterForRemoteNotifications' \
+if grep -rEn --exclude-dir='.*' \
+    'registerForRemoteNotifications|didRegisterForRemoteNotifications|didFailToRegisterForRemoteNotifications' \
     "$repository_root/NotificationManager" "$repository_root/Packages" >/dev/null; then
     fail "remote-notification registration code is not allowed"
 fi
