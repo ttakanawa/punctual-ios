@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -38,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        device: ${{ fromJSON(github.event_name == 'push' && '["iPhone 17", "iPad (A16)"]' || '["iPhone 17"]') }}
+        device: ${{ fromJSON(github.event_name == 'pull_request' && '["iPhone 17"]' || '["iPhone 17", "iPad (A16)"]') }}
     steps:
       - uses: actions/checkout@v7
         with:

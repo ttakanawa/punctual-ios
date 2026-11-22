@@ -57,7 +57,7 @@ format:
 lint:
 	bash Scripts/hooks/check-swift.sh $(SWIFT_PATHS)
 	shellcheck .githooks/pre-commit Scripts/hooks/*.sh Scripts/Tests/git-hooks.sh \
-		Scripts/Tests/xcode-cloud-hooks.sh ci_scripts/ci_post_clone.sh ci_scripts/require-main-ci.sh
+		Scripts/Tests/xcode-cloud-hooks.sh ci_scripts/ci_post_clone.sh ci_scripts/require-ci.sh
 	node --check Scripts/xcode-cloud.mjs
 	$(MAKE) validate-localizations validate-testflight
 
