@@ -191,11 +191,10 @@ async function verifySource(repository, branch, sha) {
     }
 
     try {
-        const { stdout, stderr } = await exec("sh", [fileURLToPath(requireCI), branch, sha, "--print-run-id"], {
+        const { stdout } = await exec("sh", [fileURLToPath(requireCI), branch, sha], {
             env: { ...shellEnv, GITHUB_ACTIONS_READ_TOKEN: process.env.GITHUB_ACTIONS_READ_TOKEN },
         });
-        console.log(stderr.trim());
-        return stdout.trim();
+        console.log(stdout.trim());
     } catch (error) {
         throw new Error(error.stderr?.trim() || `Could not verify CI on ${branch} at ${sha}.`);
     }
@@ -249,7 +248,7 @@ export async function main(operation, branch, sha) {
         throw new Error("Usage: node Scripts/xcode-cloud.mjs plan|apply or start <branch> <commit SHA>");
     }
     const configuration = JSON.parse(await readFile(configurationFile, "utf8"));
-    const sourceRun = operation === "start" ? await verifySource(configuration.repository, branch, sha) : undefined;
+    if (operation === "start") await verifySource(configuration.repository, branch, sha);
     await verifySecretScope(configuration.repository);
     await verifyTagRules(configuration);
     const id = env("XCODE_CLOUD_WORKFLOW_ID");
@@ -272,7 +271,7 @@ export async function main(operation, branch, sha) {
             throw new Error("Apply the Xcode Cloud configuration before starting TestFlight.");
         }
         if (!workflow.attributes.isEnabled) throw new Error("The configured Xcode Cloud workflow is disabled.");
-        const tag = `${configuration.deploymentTagPrefix}${sha}-${sourceRun}`;
+        const tag = `${configuration.deploymentTagPrefix}${sha}`;
         await ensureDeploymentTag(configuration.repository, tag, sha);
         const build = await start(workflow, repository, tag, sha);
         const summary = `Queued Xcode Cloud build ${build.attributes?.number ?? build.id} (${build.id}) for ${branch} via ${tag}.\n`;

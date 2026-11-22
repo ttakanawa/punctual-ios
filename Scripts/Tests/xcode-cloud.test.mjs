@@ -31,7 +31,7 @@ const testAction = { name: "Test iOS", actionType: "TEST" };
 const manualMain = { source: { isAllMatch: false, patterns: [{ pattern: "main", isPrefix: false }] } };
 // GitHub Actions run 45034659968 before reconciliation.
 const appleAnyBranch = { source: { isAllMatch: true, patterns: [] } };
-const tagPrefix = "punctual-testflight-v2-";
+const tagPrefix = "punctual-testflight-v1-";
 const manualTag = { source: { isAllMatch: false, patterns: [{ pattern: tagPrefix, isPrefix: true }] } };
 const repository = {
     id: "repository-id", type: "scmRepositories",
@@ -40,8 +40,7 @@ const repository = {
 
 const sha = "a".repeat(40);
 const newerSha = "b".repeat(40);
-const runId = 45043705986;
-const tag = `${tagPrefix}${sha}-${runId}`;
+const tag = `${tagPrefix}${sha}`;
 const tagRef = `refs/tags/${tag}`;
 const privateKeyName = "APP_STORE_CONNECT_ENV_PRIVATE_KEY";
 const appKeyName = "TESTFLIGHT_APP_PRIVATE_KEY";
@@ -56,7 +55,7 @@ const trustedTree = [
 
 async function fixture(context, {
     actions = [archive], manual = null, repo = repository, branch = "main", head = sha,
-    resolved = sha, githubRef = `refs/heads/${branch}`, ciConclusion = "success", missingCI = false, ciRunId = runId,
+    resolved = sha, githubRef = `refs/heads/${branch}`, ciConclusion = "success", missingCI = false,
     tree = trustedTree, tagVisible = true, existingTag = null, branchMovesAfterTag = false,
     repositoryKeys = [], environmentKeys = [privateKeyName, appKeyName], secretStatus = 200,
     deploymentPolicies = [{ name: "main", type: "branch" }], rulesetOverride = {},
@@ -75,10 +74,9 @@ async function fixture(context, {
         relationships: { repository: { data: { id: repo.id } } },
     };
     const branchRun = {
-        id: ciRunId, path: ".github/workflows/ci.yml", repository: { full_name: "ttakanawa/punctual-ios" },
         head_sha: sha, head_branch: branch, event: branch === "main" ? "push" : "workflow_dispatch",
         head_repository: { full_name: "ttakanawa/punctual-ios" }, status: "completed",
-        conclusion: ciConclusion,
+        conclusion: ciConclusion, html_url: "https://github.com/ttakanawa/punctual-ios/actions/runs/1",
     };
     const directory = await mkdtemp(join(tmpdir(), "test-testflight-"));
     const previousPath = process.env.PATH;
@@ -239,15 +237,6 @@ test("dispatch refuses the real all-branch condition before creating a tag", asy
     assert.deepEqual(tagWrites, []);
 });
 
-test("dispatch requires Apple to accept only the current deployment tag prefix", async (context) => {
-    const { calls, tagWrites } = await fixture(context, {
-        cloudTagCondition: { source: { isAllMatch: false, patterns: [{ pattern: "punctual-testflight-v1-", isPrefix: true }] } },
-    });
-    await assert.rejects(main("start", "main", sha), /Apply the Xcode Cloud configuration/);
-    assert.deepEqual(calls.map(({ method }) => method), ["GET"]);
-    assert.deepEqual(tagWrites, []);
-});
-
 for (const branch of ["main", "feature/reminders"]) {
     test(`start checks CI and queues the owner's ${branch} SHA by its Apple tag ID`, async (context) => {
         const { calls, refs, tagWrites, currentHead } = await fixture(context, { branch, branchMovesAfterTag: true });
@@ -287,12 +276,8 @@ test("an older branch or non-executable archive hook is rejected before contacti
     assert.deepEqual(calls, []);
 });
 
-for (const [reason, options] of [
-    ["failed", { ciConclusion: "failure" }],
-    ["missing", { missingCI: true }],
-    ["unidentifiable", { ciRunId: null }],
-]) {
-    test(`${reason} CI stops dispatch`, async (context) => {
+for (const options of [{ ciConclusion: "failure" }, { missingCI: true }]) {
+    test(`${options.missingCI ? "missing" : "failed"} CI stops dispatch`, async (context) => {
         const branch = "feature/reminders";
         const { calls, tagWrites } = await fixture(context, { branch, ...options });
         await assert.rejects(main("start", branch, sha), /CI \(workflow_dispatch\) must pass on feature\/reminders/);
@@ -322,6 +307,17 @@ test("an existing exact tag can be retried when the queued SHA is not yet report
     await main("start", "main", sha);
     assert.deepEqual(tagWrites, []);
     assert.equal(calls.at(-1).method, "POST");
+});
+
+test("GitHub dispatch verifies current exact CI before reusing a protected tag", async (context) => {
+    const branch = "feature/reminders";
+    const { calls, tagWrites } = await fixture(context, {
+        branch, ciConclusion: "failure",
+        existingTag: { ref: tagRef, object: { type: "commit", sha } },
+    });
+    await assert.rejects(main("start", branch, sha), /CI \(workflow_dispatch\) must pass on feature\/reminders/);
+    assert.deepEqual(calls, []);
+    assert.deepEqual(tagWrites, []);
 });
 
 test("an existing tag pointing at a different commit is never queued or rewritten", async (context) => {

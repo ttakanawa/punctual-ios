@@ -19,11 +19,9 @@ cd "$CI_PRIMARY_REPOSITORY_PATH"
 [ -f Makefile ] || fail "the primary repository must contain Makefile"
 
 case "${CI_GIT_REF:-}" in
-    refs/tags/punctual-testflight-v2-*-*) source=${CI_GIT_REF#refs/tags/punctual-testflight-v2-} ;;
+    refs/tags/punctual-testflight-v1-*) expected_sha=${CI_GIT_REF#refs/tags/punctual-testflight-v1-} ;;
     *) fail "TestFlight requires a protected deployment tag" ;;
 esac
-expected_sha=${source%%-*}
-source_run=${source#*-}
 case "$expected_sha" in
     ''|*[!0-9a-f]*) fail "the deployment tag must contain a full commit SHA" ;;
 esac
@@ -35,5 +33,4 @@ sha=$(git rev-parse --verify HEAD)
 [ "$sha" = "${CI_COMMIT:-}" ] || fail "the checked-out commit does not match CI_COMMIT"
 
 HOMEBREW_NO_AUTO_UPDATE=1 brew install jq
-sh ci_scripts/require-ci.sh "$source_run" "$sha" --from-run
 make validate-testflight
