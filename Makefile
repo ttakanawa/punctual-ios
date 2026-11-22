@@ -2,9 +2,11 @@
 
 PROJECT := NotificationManager.xcodeproj
 SCHEME := NotificationManager
-SIMULATOR_NAME ?= iPhone 17e
+SIMULATOR_NAME ?= iPhone 17
 SIMULATOR_OS ?= latest
 SIMULATOR_DESTINATION := platform=iOS Simulator,name=$(SIMULATOR_NAME),OS=$(SIMULATOR_OS)
+TEST_RESULT_BUNDLE ?=
+TEST_LOCALE := -testLanguage en -testRegion US
 
 SWIFT_PATHS := \
 	NotificationManager \
@@ -12,6 +14,7 @@ SWIFT_PATHS := \
 	NotificationManagerTests \
 	NotificationManagerIntegrationTests \
 	NotificationManagerUITests \
+	Packages/NotificationManagerCore/Package.swift \
 	Packages/NotificationManagerCore/Sources \
 	Packages/NotificationManagerCore/Tests \
 	Scripts/validate-localizations.swift
@@ -27,16 +30,17 @@ LOCALIZATION_CATALOGS := \
 	NotificationManager/Resources/Recovery.xcstrings \
 	NotificationManagerWidget/Resources/Widget.xcstrings
 
-.PHONY: help format lint test-unit test-integration test-ui build-release \
+.PHONY: help format lint test ui-test test-unit test-integration test-ui build-release \
 	validate-localizations test-localization-validator validate-testflight \
-	test-package test-testflight-validator test-ci-scripts ci-check
+	test-package test-testflight-validator test-ci-scripts test-hooks pre-commit install-hooks
 
 help:
 	@echo "make format                       Format maintained Swift sources"
-	@echo "make lint                         Verify Swift format and SwiftLint"
+	@echo "make lint                         Check source style, localization and distribution settings"
+	@echo "make test                         Run package, script, unit and integration tests"
+	@echo "make ui-test                      Run Xcode UI tests"
 	@echo "make test-unit                    Run package and Xcode unit tests"
 	@echo "make test-integration             Run Xcode integration tests"
-	@echo "make test-ui                      Run Xcode UI tests"
 	@echo "make build-release                Build Release for iOS Simulator"
 	@echo "make validate-localizations       Validate string catalogs and source coverage"
 	@echo "make test-localization-validator  Test localization validator fixtures"
@@ -44,30 +48,48 @@ help:
 	@echo "make test-package                 Run core package tests"
 	@echo "make test-testflight-validator     Test distribution build-number validation"
 	@echo "make test-ci-scripts               Test Xcode Cloud hooks and TestFlight notes"
-	@echo "make ci-check                      Run checks before Xcode Cloud actions"
+	@echo "make pre-commit                    Check staged Swift sources"
+	@echo "make install-hooks                 Enable the Git hook for this worktree"
 
 format:
 	swift format --configuration .swift-format --in-place --recursive $(SWIFT_PATHS)
 
 lint:
-	swift format lint --configuration .swift-format --recursive --strict $(SWIFT_PATHS)
-	swiftlint lint --strict --no-cache $(SWIFT_PATHS)
+	bash Scripts/hooks/check-swift.sh $(SWIFT_PATHS)
+	shellcheck .githooks/pre-commit Scripts/hooks/*.sh Scripts/Tests/git-hooks.sh \
+		Scripts/Tests/xcode-cloud-hooks.sh ci_scripts/ci_post_clone.sh ci_scripts/require-main-ci.sh
+	node --check Scripts/xcode-cloud.mjs
+	$(MAKE) validate-localizations validate-testflight
+
+test: test-package test-localization-validator test-testflight-validator test-ci-scripts test-hooks
+	xcodebuild test -project $(PROJECT) -scheme $(SCHEME) \
+		-destination '$(SIMULATOR_DESTINATION)' \
+		-skip-testing:NotificationManagerUITests \
+		$(TEST_LOCALE) $(if $(TEST_RESULT_BUNDLE),-resultBundlePath "$(TEST_RESULT_BUNDLE)")
+
+pre-commit:
+	bash Scripts/hooks/pre-commit.sh $(SWIFT_PATHS)
+
+install-hooks:
+	bash Scripts/hooks/install.sh
 
 test-unit:
 	$(MAKE) test-package
 	xcodebuild test -project $(PROJECT) -scheme $(SCHEME) \
-		-destination '$(SIMULATOR_DESTINATION)' \
+		-destination '$(SIMULATOR_DESTINATION)' $(TEST_LOCALE) \
 		-only-testing:NotificationManagerTests
 
 test-integration:
 	xcodebuild test -project $(PROJECT) -scheme $(SCHEME) \
-		-destination '$(SIMULATOR_DESTINATION)' \
+		-destination '$(SIMULATOR_DESTINATION)' $(TEST_LOCALE) \
 		-only-testing:NotificationManagerIntegrationTests
 
-test-ui:
+ui-test:
 	xcodebuild test -project $(PROJECT) -scheme $(SCHEME) \
-		-destination '$(SIMULATOR_DESTINATION)' \
+		-destination '$(SIMULATOR_DESTINATION)' $(TEST_LOCALE) \
 		-only-testing:NotificationManagerUITests
+
+test-ui: ui-test
 
 build-release:
 	xcodebuild build -project $(PROJECT) -scheme $(SCHEME) \
@@ -93,9 +115,7 @@ test-testflight-validator:
 test-ci-scripts:
 	sh Scripts/Tests/xcode-cloud-hooks.sh
 	sh Scripts/Tests/testflight-notes.sh
+	node --test Scripts/Tests/xcode-cloud.test.mjs
 
-ci-check:
-	$(MAKE) lint
-	$(MAKE) validate-localizations test-localization-validator
-	$(MAKE) validate-testflight test-testflight-validator test-ci-scripts
-	$(MAKE) test-package
+test-hooks:
+	bash Scripts/Tests/git-hooks.sh

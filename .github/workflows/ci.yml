@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install lint tools
+        uses: jdx/mise-action@v5
+        with:
+          install: true
+          install_args: node shellcheck swiftlint
+      - run: make lint
+
+  test:
+    name: Test (${{ matrix.device }})
+    runs-on: macos-26
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        device: ${{ fromJSON(github.event_name == 'push' && '["iPhone 17", "iPad (A16)"]' || '["iPhone 17"]') }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install test tools
+        uses: jdx/mise-action@v5
+        with:
+          install: true
+          install_args: node
+      - name: Run tests
+        shell: bash
+        env:
+          SIMULATOR_NAME: ${{ matrix.device }}
+          SIMULATOR_OS: "26.5"
+          TEST_RESULT_BUNDLE: ${{ runner.temp }}/TestResults.xcresult
+        run: make test 2>&1 | tee "$RUNNER_TEMP/test.log"
+      - name: Save test results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: Test results - ${{ matrix.device }}
+          path: |
+            ${{ runner.temp }}/test.log
+            ${{ runner.temp }}/TestResults.xcresult
+          retention-days: 7

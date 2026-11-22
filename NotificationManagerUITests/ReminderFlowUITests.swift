@@ -31,7 +31,7 @@ final class ReminderFlowUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Date Picker"].waitForExistence(timeout: 1))
         app.buttons["Date Picker"].tap()
         app.buttons["Thursday 5 July"].tap()
-        app.buttons["PopoverDismissRegion"].tap()
+        dismissSchedulePopover(in: app)
         XCTAssertEqual(dateRow.value as? String, "2040-07-05")
 
         let timeRow = app.otherElements["reminder-form.time"]
@@ -39,13 +39,15 @@ final class ReminderFlowUITests: XCTestCase {
         XCTAssertEqual(timeRow.value as? String, "23:00")
         let time = app.buttons["Time Picker"]
         XCTAssertTrue(time.waitForExistence(timeout: 1))
+        scrollToHittable(time, in: app)
+        XCTAssertTrue(time.isHittable)
         XCTAssertTrue(time.isEnabled)
         time.tap()
         let timeWheels = app.pickerWheels
         XCTAssertEqual(timeWheels.count, 2)
         timeWheels.element(boundBy: 0).adjust(toPickerWheelValue: "22")
         timeWheels.element(boundBy: 1).adjust(toPickerWheelValue: "30")
-        app.buttons["PopoverDismissRegion"].tap()
+        dismissSchedulePopover(in: app)
         XCTAssertEqual(timeRow.value as? String, "22:30")
 
         let timeZone = app.buttons["reminder-form.time-zone"]
@@ -321,7 +323,10 @@ final class ReminderFlowUITests: XCTestCase {
 
     @MainActor
     func testTagPickerOffersInlineCaseSensitiveCreationSuggestion() {
-        let app = launch(scenario: "navigation-with-tags")
+        let app = launch(
+            scenario: "navigation-with-tags",
+            extraArguments: deterministicEnglish24HourArguments
+        )
         app.buttons["reminder-row.aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"].tap()
 
         let input = app.textFields["tags.picker.new-name"]
@@ -356,7 +361,10 @@ final class ReminderFlowUITests: XCTestCase {
 
     @MainActor
     func testTagPickerUsesExplicitAddAndRemoveActions() {
-        let app = launch(scenario: "navigation-with-tags")
+        let app = launch(
+            scenario: "navigation-with-tags",
+            extraArguments: deterministicEnglish24HourArguments
+        )
         app.buttons["reminder-row.aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"].tap()
 
         let input = app.textFields["tags.picker.new-name"]
@@ -379,7 +387,10 @@ final class ReminderFlowUITests: XCTestCase {
 
     @MainActor
     func testTagRemovalImmediatelyDisablesRegisteredFormActions() {
-        let app = launch(scenario: "slow-tag-removal")
+        let app = launch(
+            scenario: "slow-tag-removal",
+            extraArguments: deterministicEnglish24HourArguments
+        )
         app.buttons["reminder-row.aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"].tap()
 
         let delete = app.buttons["reminder-form.delete"]
@@ -437,6 +448,9 @@ final class ReminderFlowUITests: XCTestCase {
         let app = launch(scenario: "slow-persistence")
         app.buttons["reminder-row.aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"].tap()
 
+        let back = app.buttons["reminder-form.back"]
+        XCTAssertTrue(back.waitForExistence(timeout: 2))
+        XCTAssertTrue(back.isEnabled)
         let delete = app.buttons["reminder-form.delete"]
         scrollToHittable(delete, in: app)
         delete.tap()
@@ -446,9 +460,9 @@ final class ReminderFlowUITests: XCTestCase {
         let confirm = alert.buttons["reminder-form.delete-confirm"].firstMatch
         confirm.tap()
 
-        XCTAssertTrue(alert.waitForNonExistence(timeout: 1))
-        XCTAssertFalse(app.buttons["reminder-form.back"].isEnabled)
-        XCTAssertTrue(app.otherElements["reminder-list.root"].waitForExistence(timeout: 3))
+        XCTAssertFalse(back.isEnabled)
+        XCTAssertTrue(app.otherElements["reminder-form.root"].waitForNonExistence(timeout: 15))
+        XCTAssertTrue(app.otherElements["reminder-list.root"].exists)
     }
 
     @MainActor
@@ -464,9 +478,10 @@ final class ReminderFlowUITests: XCTestCase {
         XCTAssertFalse(app.textFields["reminder-form.custom.input"].exists)
         XCTAssertFalse(app.buttons["reminder-form.save"].exists)
 
-        app.buttons["reminder-form.custom.replace"].tap()
+        beginCustomRepeatReplacement(in: app)
 
         let input = app.textFields["reminder-form.custom.input"]
+        scrollToHittable(input, in: app)
         XCTAssertTrue(input.waitForExistence(timeout: 1))
         input.tap()
         input.typeText("every 3 ")
@@ -481,11 +496,12 @@ final class ReminderFlowUITests: XCTestCase {
             extraArguments: deterministicEnglish24HourArguments
         )
         app.buttons["reminder-row.bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"].tap()
-        app.buttons["reminder-form.custom.replace"].tap()
+        beginCustomRepeatReplacement(in: app)
 
         let icon = app.images["reminder-form.custom.apple-intelligence-icon"]
         let status = app.staticTexts["reminder-form.custom.apple-intelligence-status"]
 
+        scrollToHittable(status, in: app)
         XCTAssertTrue(icon.waitForExistence(timeout: 2))
         XCTAssertTrue(status.waitForExistence(timeout: 2))
         XCTAssertEqual(status.label, "Apple Intelligence is unavailable on this system.")
@@ -495,12 +511,15 @@ final class ReminderFlowUITests: XCTestCase {
     func testEnglishSuggestionsOfferCandidatesAndExplicitAssistanceBeforeSelection() {
         let app = launch(scenario: "localized-custom-rule")
         app.buttons["reminder-row.bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"].tap()
-        app.buttons["reminder-form.custom.replace"].tap()
+        beginCustomRepeatReplacement(in: app)
 
         let input = app.textFields["reminder-form.custom.input"]
+        scrollToHittable(input, in: app)
         input.tap()
         input.typeText("Every mont")
-        app.buttons["reminder-form.custom.preview-button"].tap()
+        let previewButton = app.buttons["reminder-form.custom.preview-button"]
+        scrollToHittable(previewButton, in: app)
+        previewButton.tap()
 
         let monday = app.buttons["reminder-form.custom.suggestion-0"]
         let month = app.buttons["reminder-form.custom.suggestion-1"]
@@ -513,6 +532,7 @@ final class ReminderFlowUITests: XCTestCase {
         XCTAssertEqual(input.value as? String, "Every mont")
         XCTAssertFalse(app.buttons["reminder-form.save"].isEnabled)
 
+        scrollToHittable(monday, in: app)
         monday.tap()
 
         let preview = app.descendants(matching: .any)
@@ -536,12 +556,15 @@ final class ReminderFlowUITests: XCTestCase {
     func testCustomRepeatPreviewShowsOnlyTheCanonicalSentence() {
         let app = launch(scenario: "localized-custom-rule")
         app.buttons["reminder-row.bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"].tap()
-        app.buttons["reminder-form.custom.replace"].tap()
+        beginCustomRepeatReplacement(in: app)
 
         let input = app.textFields["reminder-form.custom.input"]
+        scrollToHittable(input, in: app)
         input.tap()
         input.typeText("Every month on the first fri")
-        app.buttons["reminder-form.custom.preview-button"].tap()
+        let previewButton = app.buttons["reminder-form.custom.preview-button"]
+        scrollToHittable(previewButton, in: app)
+        previewButton.tap()
 
         let preview = app.descendants(matching: .any)
             .matching(identifier: "reminder-form.custom.preview-result")
@@ -676,8 +699,14 @@ final class ReminderFlowUITests: XCTestCase {
         scrollToHittable(row, in: app)
         row.tap()
         XCTAssertTrue(app.pickerWheels.firstMatch.waitForExistence(timeout: 2))
-        app.pickerWheels.element(boundBy: 0).adjust(toPickerWheelValue: hours)
-        app.pickerWheels.element(boundBy: 1).adjust(toPickerWheelValue: minutes)
+        let hoursWheel = app.pickerWheels.element(boundBy: 0)
+        if hoursWheel.value as? String != hours {
+            hoursWheel.adjust(toPickerWheelValue: hours)
+        }
+        let minutesWheel = app.pickerWheels.element(boundBy: 1)
+        if minutesWheel.value as? String != minutes {
+            minutesWheel.adjust(toPickerWheelValue: minutes)
+        }
         app.buttons["reminder-form.live-activity-duration.done"].tap()
     }
 
@@ -691,6 +720,30 @@ final class ReminderFlowUITests: XCTestCase {
                 count: currentValue.count
             ))
         field.typeText(value)
+    }
+
+    @MainActor
+    private func dismissSchedulePopover(in app: XCUIApplication) {
+        let backdrop = app.buttons["PopoverDismissRegion"]
+        // Tap the margin above the picker. The backdrop frame extends beyond the window on iPad.
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.07)).tap()
+        XCTAssertTrue(backdrop.waitForNonExistence(timeout: 3))
+    }
+
+    @MainActor
+    private func beginCustomRepeatReplacement(in app: XCUIApplication) {
+        let form = app.otherElements["reminder-form.root"]
+        let replace = app.buttons["reminder-form.custom.replace"]
+        for _ in 0..<8 {
+            if replace.exists,
+                form.frame.contains(CGPoint(x: replace.frame.midX, y: replace.frame.midY))
+            {
+                break
+            }
+            form.swipeUp()
+        }
+        // UIKit reports the full row even where only the leading label can be tapped on iPad.
+        replace.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.5)).tap()
     }
 
     @MainActor
