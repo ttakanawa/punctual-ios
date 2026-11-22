@@ -1,5 +1,7 @@
 {
   "repository": "ttakanawa/punctual-ios",
+  "workflowName": "TestFlight (verified tags)",
+  "deploymentTagPrefix": "punctual-testflight-v1-",
   "project": "NotificationManager.xcodeproj",
   "scheme": "NotificationManager",
   "platform": "IOS",
@@ -9,13 +11,13 @@
     "tagStartCondition": null,
     "pullRequestStartCondition": null,
     "scheduledStartCondition": null,
-    "manualBranchStartCondition": {
+    "manualBranchStartCondition": null,
+    "manualPullRequestStartCondition": null,
+    "manualTagStartCondition": {
       "source": {
         "isAllMatch": false,
-        "patterns": [{ "pattern": "main", "isPrefix": false }]
+        "patterns": [{ "pattern": "punctual-testflight-v1-", "isPrefix": true }]
       }
-    },
-    "manualPullRequestStartCondition": null,
-    "manualTagStartCondition": null
+    }
   }
 }

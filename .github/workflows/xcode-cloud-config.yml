@@ -38,12 +38,24 @@ jobs:
         if: inputs.operation == 'apply'
         env:
           GITHUB_ACTIONS_READ_TOKEN: ${{ github.token }}
-        run: sh ci_scripts/require-main-ci.sh "$GITHUB_SHA"
+        run: sh ci_scripts/require-ci.sh main "$GITHUB_SHA"
+      - name: Authorize secret preflight
+        id: deployment-app
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          client-id: ${{ vars.TESTFLIGHT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.TESTFLIGHT_APP_PRIVATE_KEY }}
+          permission-environments: read
+          permission-secrets: read
       - name: Reconcile Xcode Cloud workflow
         env:
           XCODE_CLOUD_OPERATION: ${{ inputs.operation }}
+          GITHUB_ACTIONS_READ_TOKEN: ${{ github.token }}
+          TESTFLIGHT_APP_TOKEN: ${{ steps.deployment-app.outputs.token }}
+          TESTFLIGHT_TAG_CREATION_RULESET_ID: ${{ vars.TESTFLIGHT_TAG_CREATION_RULESET_ID }}
+          TESTFLIGHT_TAG_IMMUTABILITY_RULESET_ID: ${{ vars.TESTFLIGHT_TAG_IMMUTABILITY_RULESET_ID }}
           XCODE_CLOUD_WORKFLOW_ID: ${{ vars.XCODE_CLOUD_WORKFLOW_ID }}
           APP_STORE_CONNECT_ISSUER_ID: ${{ vars.APP_STORE_CONNECT_ISSUER_ID }}
           APP_STORE_CONNECT_KEY_ID: ${{ vars.APP_STORE_CONNECT_KEY_ID }}
-          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_ENV_PRIVATE_KEY }}
         run: node Scripts/xcode-cloud.mjs "$XCODE_CLOUD_OPERATION"
