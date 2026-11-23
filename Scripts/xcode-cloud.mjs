@@ -8,6 +8,9 @@ const api = new URL("https://api.appstoreconnect.apple.com");
 const configurationFile = new URL("../infra/xcode-cloud/testflight.json", import.meta.url);
 const requireCI = new URL("../ci_scripts/require-ci.sh", import.meta.url);
 const exec = promisify(execFile);
+const appleSettings = [
+    "XCODE_CLOUD_WORKFLOW_ID", "APP_STORE_CONNECT_ISSUER_ID", "APP_STORE_CONNECT_KEY_ID", "APP_STORE_CONNECT_ENV_PRIVATE_KEY",
+];
 
 function env(name) {
     const value = process.env[name];
@@ -26,7 +29,7 @@ function token() {
     };
     const unsigned = [header, claims].map((part) => Buffer.from(JSON.stringify(part)).toString("base64url")).join(".");
     const signature = sign("sha256", Buffer.from(unsigned), {
-        key: env("APP_STORE_CONNECT_PRIVATE_KEY"),
+        key: env("APP_STORE_CONNECT_ENV_PRIVATE_KEY"),
         dsaEncoding: "ieee-p1363",
     });
     return `${unsigned}.${signature.toString("base64url")}`;
@@ -90,16 +93,14 @@ export function desiredChanges(current, configuration) {
     }));
 }
 
-async function github(repository, path, { accessToken = process.env.GITHUB_ACTIONS_READ_TOKEN, data, allowMissing } = {}) {
+async function github(repository, path, { allowMissing } = {}) {
+    const accessToken = process.env.GITHUB_TOKEN;
     const response = await fetch(new URL(`https://api.github.com/repos/${repository}/${path}`), {
-        method: data ? "POST" : "GET",
         headers: {
             Accept: "application/vnd.github+json",
             "X-GitHub-Api-Version": "2026-03-10",
             ...(accessToken && { Authorization: `Bearer ${accessToken}` }),
-            ...(data && { "Content-Type": "application/json" }),
         },
-        body: data ? JSON.stringify(data) : undefined,
         redirect: "error",
         signal: AbortSignal.timeout(15_000),
     });
@@ -108,44 +109,35 @@ async function github(repository, path, { accessToken = process.env.GITHUB_ACTIO
     return response.json();
 }
 
-async function verifySecretScope(repository) {
-    const accessToken = env("TESTFLIGHT_APP_TOKEN");
-    const [repositorySecrets, environmentSecrets, policies] = await Promise.all([
-        github(repository, "actions/secrets?per_page=100", { accessToken }),
-        github(repository, "environments/appstore-connect/secrets?per_page=100", { accessToken }),
+async function verifyEnvironment(repository) {
+    const [environment, policies] = await Promise.all([
+        github(repository, "environments/appstore-connect"),
         github(repository, "environments/appstore-connect/deployment-branch-policies"),
     ]);
-    if (policies.total_count !== 1 || policies.branch_policies?.length !== 1 ||
+    if (environment.deployment_branch_policy?.custom_branch_policies !== true ||
+        environment.deployment_branch_policy?.protected_branches !== false ||
+        policies.total_count !== 1 || policies.branch_policies?.length !== 1 ||
         policies.branch_policies[0]?.name !== "main" || policies.branch_policies[0]?.type !== "branch") {
         throw new Error("Restrict the appstore-connect environment to the main branch.");
-    }
-    const required = ["APP_STORE_CONNECT_ENV_PRIVATE_KEY", "TESTFLIGHT_APP_PRIVATE_KEY"];
-    const prohibited = [...required, "APP_STORE_CONNECT_PRIVATE_KEY"];
-    if (!Array.isArray(repositorySecrets.secrets) || repositorySecrets.secrets.length !== repositorySecrets.total_count ||
-        repositorySecrets.secrets.some(({ name }) => prohibited.includes(name))) {
-        throw new Error("Remove the App Store Connect and deployment App keys from repository secrets.");
-    }
-    if (!required.every((key) => environmentSecrets.secrets?.some(({ name }) => name === key))) {
-        throw new Error("Store both private keys in the appstore-connect environment.");
     }
 }
 
 async function verifyTagRules({ repository, deploymentTagPrefix }) {
     const patterns = [`refs/tags/${deploymentTagPrefix}*`, `refs/tags/${deploymentTagPrefix}*/**/*`];
-    const required = {
-        TESTFLIGHT_TAG_CREATION_RULESET_ID: ["creation"],
-        TESTFLIGHT_TAG_IMMUTABILITY_RULESET_ID: ["update", "deletion"],
-    };
-    for (const [variable, rules] of Object.entries(required)) {
-        const id = env(variable);
-        if (!/^[0-9]+$/.test(id)) throw new Error(`Set ${variable} to its GitHub ruleset ID.`);
-        const ruleset = await github(repository, `rulesets/${id}`);
-        const match = ruleset.conditions?.ref_name;
-        if (ruleset.target !== "tag" || ruleset.enforcement !== "active" ||
-            !isDeepStrictEqual(match?.exclude, []) || !patterns.every((pattern) => match?.include?.includes(pattern)) ||
-            !rules.every((rule) => ruleset.rules?.some(({ type }) => type === rule))) {
-            throw new Error(`Ruleset ${id} must actively enforce ${rules.join(" and ")} on the full deployment tag namespace.`);
-        }
+    const id = process.env.TESTFLIGHT_TAG_IMMUTABILITY_RULESET_ID;
+    if (!/^[0-9]+$/.test(id ?? "")) {
+        throw new Error("Set the repository variable TESTFLIGHT_TAG_IMMUTABILITY_RULESET_ID to the GitHub ruleset ID.");
+    }
+    const ruleset = await github(repository, `rulesets/${id}`);
+    const match = ruleset.conditions?.ref_name;
+    const rules = ruleset.rules?.map(({ type }) => type) ?? [];
+    if (ruleset.target !== "tag" || ruleset.enforcement !== "active" ||
+        !isDeepStrictEqual(match?.exclude, []) || !patterns.every((pattern) => match?.include?.includes(pattern)) ||
+        !rules.includes("update") || !rules.includes("deletion")) {
+        throw new Error(`Ruleset ${id} must actively restrict updates and deletions on the full deployment tag namespace.`);
+    }
+    if (rules.includes("creation") || (ruleset.bypass_actors !== undefined && !isDeepStrictEqual(ruleset.bypass_actors, []))) {
+        throw new Error(`Ruleset ${id} must allow tag creation and have an empty bypass list.`);
     }
 }
 
@@ -159,10 +151,9 @@ async function branchHead(repository, branch) {
     return sha;
 }
 
-async function verifySource(repository, branch, sha) {
-    const shellEnv = { PATH: process.env.PATH };
+async function verifyBranch(repository, branch, sha) {
     try {
-        await exec("git", ["check-ref-format", `refs/heads/${branch ?? ""}`], { env: shellEnv });
+        await exec("git", ["check-ref-format", `refs/heads/${branch ?? ""}`], { env: { PATH: process.env.PATH } });
     } catch {
         throw new Error("Enter a repository branch name, such as main or feature/reminders.");
     }
@@ -170,8 +161,15 @@ async function verifySource(repository, branch, sha) {
         throw new Error("Enter the full lowercase commit SHA from the passing CI run.");
     }
     if (await branchHead(repository, branch) !== sha) {
-        throw new Error(`${branch} is no longer at ${sha}. Check CI on the current head and dispatch again.`);
+        throw movedBranch(branch, sha);
     }
+}
+
+function movedBranch(branch, sha) {
+    return new Error(`${branch} is no longer at ${sha}. Check CI on the current head and dispatch again.`);
+}
+
+async function verifySourceTree(repository, branch, sha) {
     const { tree, truncated } = await github(repository, `git/trees/${sha}?recursive=1`);
     if (truncated) throw new Error(`GitHub returned an incomplete tree for ${sha}.`);
 
@@ -189,10 +187,12 @@ async function verifySource(repository, branch, sha) {
             throw new Error(`${branch} must adopt ${path} from main before TestFlight.`);
         }
     }
+}
 
+async function verifyCI(branch, sha) {
     try {
         const { stdout } = await exec("sh", [fileURLToPath(requireCI), branch, sha], {
-            env: { ...shellEnv, GITHUB_ACTIONS_READ_TOKEN: process.env.GITHUB_ACTIONS_READ_TOKEN },
+            env: { PATH: process.env.PATH, GITHUB_ACTIONS_READ_TOKEN: process.env.GITHUB_TOKEN },
         });
         console.log(stdout.trim());
     } catch (error) {
@@ -200,20 +200,40 @@ async function verifySource(repository, branch, sha) {
     }
 }
 
-async function ensureDeploymentTag(repository, tag, sha) {
+async function readDeploymentTag(repository, tag, sha) {
     const ref = `refs/tags/${tag}`;
-    const path = `git/ref/tags/${tag}`;
-    const existing = await github(repository, path, { allowMissing: true });
-    const pinned = existing ?? await github(repository, "git/refs", {
-        accessToken: env("TESTFLIGHT_APP_TOKEN"),
-        data: { ref, sha },
-    });
-    if (pinned.ref !== ref || pinned.object?.type !== "commit" || pinned.object.sha !== sha) {
+    const pinned = await github(repository, `git/ref/tags/${tag}`, { allowMissing: true });
+    if (pinned && (pinned.ref !== ref || pinned.object?.type !== "commit" || pinned.object.sha !== sha)) {
         throw new Error(`${ref} does not point directly to ${sha}.`);
     }
+    return pinned;
 }
 
-async function start(workflow, repository, tag, sha) {
+async function ensureDeploymentTag(repository, branch, tag, sha) {
+    if (await readDeploymentTag(repository, tag, sha)) return;
+
+    const token = process.env.GITHUB_TOKEN;
+    if (!token) throw new Error("Tag creation requires the GitHub Actions token with contents: write.");
+    const remote = `https://github.com/${repository}.git`;
+    const gitEnv = {
+        PATH: process.env.PATH,
+        GIT_TERMINAL_PROMPT: "0",
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
+        GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
+    };
+    // Fetch only the existing branch tip. Never check out or run the selected branch on this runner.
+    await exec("git", ["fetch", "--no-tags", "--depth=1", remote, `refs/heads/${branch}`], { env: gitEnv });
+    const { stdout } = await exec("git", ["rev-parse", "--verify", "FETCH_HEAD"], { env: { PATH: process.env.PATH } });
+    if (stdout.trim() !== sha) throw movedBranch(branch, sha);
+
+    const ref = `refs/tags/${tag}`;
+    // The empty lease requires an absent ref even if another writer creates the tag after our read.
+    await exec("git", ["push", "--no-follow-tags", `--force-with-lease=${ref}:`, remote, `${sha}:${ref}`], { env: gitEnv });
+    if (!await readDeploymentTag(repository, tag, sha)) throw new Error(`GitHub did not return ${ref} after creation.`);
+}
+
+async function start(workflow, repository, tag, { githubRepository, branch, sha }) {
     let nextPage = `/v1/scmRepositories/${encodeURIComponent(repository.id)}/gitReferences?limit=200`;
     while (nextPage) {
         const page = await request(nextPage);
@@ -223,6 +243,9 @@ async function start(workflow, repository, tag, sha) {
             nextPage = page.links?.next;
             continue;
         }
+        // Reruns can reuse the completed tag job. Check CI and the branch again before every Apple POST.
+        await verifyCI(branch, sha);
+        await verifyBranch(githubRepository, branch, sha);
         const { data: build } = await request("/v1/ciBuildRuns", {
             method: "POST",
             data: {
@@ -244,21 +267,53 @@ async function start(workflow, repository, tag, sha) {
 }
 
 export async function main(operation, branch, sha) {
-    if (!["plan", "apply", "start"].includes(operation)) {
-        throw new Error("Usage: node Scripts/xcode-cloud.mjs plan|apply or start <branch> <commit SHA>");
+    if (!["plan", "apply", "tag", "start"].includes(operation)) {
+        throw new Error("Usage: node Scripts/xcode-cloud.mjs plan|apply or tag|start <branch> <commit SHA>");
     }
     const configuration = JSON.parse(await readFile(configurationFile, "utf8"));
-    if (operation === "start") await verifySource(configuration.repository, branch, sha);
-    await verifySecretScope(configuration.repository);
-    await verifyTagRules(configuration);
+    const { repository: slug, deploymentTagPrefix } = configuration;
+    const tag = `${deploymentTagPrefix}${sha}`;
+    if (operation === "tag" || operation === "start") await verifyBranch(slug, branch, sha);
+
+    if (operation === "plan") {
+        for (const check of [() => verifyEnvironment(slug), () => verifyTagRules(configuration)]) {
+            try {
+                await check();
+            } catch (error) {
+                console.log(`Setup required: ${error.message}`);
+            }
+        }
+        console.log("In GitHub Settings, verify the empty tag ruleset bypass list and the environment-only Apple key.");
+        const missing = appleSettings.filter((name) => !process.env[name]);
+        if (missing.length) {
+            console.log(`Set ${missing.join(", ")} in the appstore-connect GitHub environment for an Apple readback.`);
+            console.log(`Desired Xcode Cloud configuration:\n${JSON.stringify(configuration, null, 2)}`);
+            return;
+        }
+    } else {
+        await verifyEnvironment(slug);
+        await verifyTagRules(configuration);
+    }
+
+    if (operation === "tag") {
+        await verifySourceTree(slug, branch, sha);
+        await verifyCI(branch, sha);
+        await ensureDeploymentTag(slug, branch, tag, sha);
+        console.log(`Pinned ${branch} at ${sha} via ${tag}.`);
+        return;
+    }
+    if (operation === "start" && !await readDeploymentTag(slug, tag, sha)) {
+        throw new Error(`GitHub does not have the deployment tag ${tag}.`);
+    }
+
     const id = env("XCODE_CLOUD_WORKFLOW_ID");
     const path = `/v1/ciWorkflows/${encodeURIComponent(id)}`;
     const { data: workflow, included } = await request(`${path}?include=repository`);
     const repository = included?.find((entry) =>
         entry.type === "scmRepositories" && entry.id === workflow.relationships?.repository?.data?.id);
-    const slug = `${repository?.attributes.ownerName}/${repository?.attributes.repositoryName}`;
-    if (slug.toLowerCase() !== configuration.repository.toLowerCase()) {
-        throw new Error(`Workflow repository is ${slug}; expected ${configuration.repository}.`);
+    const appleSlug = `${repository?.attributes.ownerName}/${repository?.attributes.repositoryName}`;
+    if (appleSlug.toLowerCase() !== slug.toLowerCase()) {
+        throw new Error(`Workflow repository is ${appleSlug}; expected ${slug}.`);
     }
     if (workflow.attributes.name !== configuration.workflowName) {
         throw new Error(`Select the dedicated ${configuration.workflowName} workflow in XCODE_CLOUD_WORKFLOW_ID.`);
@@ -271,9 +326,7 @@ export async function main(operation, branch, sha) {
             throw new Error("Apply the Xcode Cloud configuration before starting TestFlight.");
         }
         if (!workflow.attributes.isEnabled) throw new Error("The configured Xcode Cloud workflow is disabled.");
-        const tag = `${configuration.deploymentTagPrefix}${sha}`;
-        await ensureDeploymentTag(configuration.repository, tag, sha);
-        const build = await start(workflow, repository, tag, sha);
+        const build = await start(workflow, repository, tag, { githubRepository: slug, branch, sha });
         const summary = `Queued Xcode Cloud build ${build.attributes?.number ?? build.id} (${build.id}) for ${branch} via ${tag}.\n`;
         console.log(summary.trim());
         if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, summary);

@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";
 import { generateKeyPairSync, verify } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { test } from "node:test";
@@ -12,10 +12,8 @@ Object.assign(process.env, {
     XCODE_CLOUD_WORKFLOW_ID: "workflow-id",
     APP_STORE_CONNECT_ISSUER_ID: "issuer-id",
     APP_STORE_CONNECT_KEY_ID: "key-id",
-    APP_STORE_CONNECT_PRIVATE_KEY: privateKey.export({ type: "pkcs8", format: "pem" }),
-    GITHUB_ACTIONS_READ_TOKEN: "read-token",
-    TESTFLIGHT_APP_TOKEN: "app-token",
-    TESTFLIGHT_TAG_CREATION_RULESET_ID: "11",
+    APP_STORE_CONNECT_ENV_PRIVATE_KEY: privateKey.export({ type: "pkcs8", format: "pem" }),
+    GITHUB_TOKEN: "job-token",
     TESTFLIGHT_TAG_IMMUTABILITY_RULESET_ID: "12",
 });
 
@@ -42,8 +40,9 @@ const sha = "a".repeat(40);
 const newerSha = "b".repeat(40);
 const tag = `${tagPrefix}${sha}`;
 const tagRef = `refs/tags/${tag}`;
-const privateKeyName = "APP_STORE_CONNECT_ENV_PRIVATE_KEY";
-const appKeyName = "TESTFLIGHT_APP_PRIVATE_KEY";
+const pinnedTag = { ref: tagRef, object: { type: "commit", sha } };
+const remote = "https://github.com/ttakanawa/punctual-ios.git";
+const gitPath = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
 const trustedTree = [
     [".github/workflows/ci.yml", "100644"],
     ["ci_scripts/ci_post_clone.sh", "100755"],
@@ -56,9 +55,10 @@ const trustedTree = [
 async function fixture(context, {
     actions = [archive], manual = null, repo = repository, branch = "main", head = sha,
     resolved = sha, githubRef = `refs/heads/${branch}`, ciConclusion = "success", missingCI = false,
-    tree = trustedTree, tagVisible = true, existingTag = null, branchMovesAfterTag = false,
-    repositoryKeys = [], environmentKeys = [privateKeyName, appKeyName], secretStatus = 200,
-    deploymentPolicies = [{ name: "main", type: "branch" }], rulesetOverride = {},
+    ciSHA = sha, ciFailsDuringDiscovery = false,
+    tree = trustedTree, tagVisible = true, existingTag = null, branchMovesDuringDiscovery = false,
+    fetchedHead = sha, pushStatus = 0, policyEnabled = true,
+    deploymentPolicies = [{ name: "main", type: "branch" }], rulesetOverride = {}, rulesetStatus = 200,
     workflowName = "TestFlight (verified tags)", readbackManual = null, cloudTagCondition = manualTag,
 } = {}) {
     const workflow = {
@@ -74,7 +74,7 @@ async function fixture(context, {
         relationships: { repository: { data: { id: repo.id } } },
     };
     const branchRun = {
-        head_sha: sha, head_branch: branch, event: branch === "main" ? "push" : "workflow_dispatch",
+        head_sha: ciSHA, head_branch: branch, event: branch === "main" ? "push" : "workflow_dispatch",
         head_repository: { full_name: "ttakanawa/punctual-ios" }, status: "completed",
         conclusion: ciConclusion, html_url: "https://github.com/ttakanawa/punctual-ios/actions/runs/1",
     };
@@ -88,16 +88,43 @@ async function fixture(context, {
     await writeFile(join(directory, "curl"), [
         "#!/bin/sh",
         "set -eu",
-        '[ -z "${APP_STORE_CONNECT_PRIVATE_KEY:-}" ]',
-        '[ -z "${TESTFLIGHT_APP_TOKEN:-}" ]',
+        '[ -z "${APP_STORE_CONNECT_ENV_PRIVATE_KEY:-}" ]',
+        '[ -z "${GITHUB_TOKEN:-}" ]',
+        '[ "$GITHUB_ACTIONS_READ_TOKEN" = job-token ]',
+        `case " $* " in *' branch=${branch} '*"head_sha=${sha} "*) ;; *) exit 98 ;; esac`,
+        'printf "%s\\n" "$*" >> "$0.calls"',
         '/bin/cat "$0.response"',
         "",
+    ].join("\n"), { mode: 0o755 });
+    const auth = Buffer.from("x-access-token:job-token").toString("base64");
+    await writeFile(join(directory, "git"), [
+        "#!/bin/sh",
+        "set -eu",
+        '[ -z "${APP_STORE_CONNECT_ENV_PRIVATE_KEY:-}" ]',
+        'case "$1" in',
+        `  fetch|push) [ "$GIT_CONFIG_VALUE_0" = 'Authorization: Basic ${auth}' ]`,
+        '    [ "$GIT_CONFIG_KEY_0" = http.https://github.com/.extraheader ]',
+        '    [ "$GIT_TERMINAL_PROMPT" = 0 ]',
+        '    printf "%s\\n" "$*" >> "$0.calls"',
+        `    if [ "$1" = push ]; then [ ${pushStatus} -eq 0 ] || exit ${pushStatus}; touch "$0.pushed"; fi ;;`,
+        `  rev-parse) [ "$*" = 'rev-parse --verify FETCH_HEAD' ]; printf '%s\\n' '${fetchedHead}' ;;`,
+        `  *) exec '${gitPath}' "$@" ;;`,
+        "esac",
     ].join("\n"), { mode: 0o755 });
     process.env.PATH = `${directory}${delimiter}${previousPath}`;
 
     const calls = [];
     const refs = [];
-    const tagWrites = [];
+    async function readCalls(command) {
+        const log = await readFile(join(directory, `${command}.calls`), "utf8").catch((error) => {
+            if (error.code !== "ENOENT") throw error;
+            return "";
+        });
+        return log.trim() ? log.trim().split("\n") : [];
+    }
+    async function remoteTag() {
+        return existingTag ?? await readFile(join(directory, "git.pushed")).then(() => pinnedTag, () => null);
+    }
     let remoteHead = head;
     context.mock.method(globalThis, "fetch", async (url, request) => {
         if (url.origin === "https://api.github.com") {
@@ -105,8 +132,8 @@ async function fixture(context, {
             const prefix = "/repos/ttakanawa/punctual-ios";
             assert.ok(url.pathname.startsWith(`${prefix}/`));
             const path = url.pathname.slice(prefix.length);
-            const appRequest = ["/actions/secrets", "/environments/appstore-connect/secrets", "/git/refs"].includes(path);
-            assert.equal(request.headers.Authorization, appRequest ? "Bearer app-token" : "Bearer read-token");
+            assert.equal(request.headers.Authorization, "Bearer job-token");
+            assert.equal(request.method ?? "GET", "GET");
             if (path === `/git/ref/heads/${encodeURIComponent(branch)}`) {
                 refs.push(remoteHead);
                 return Response.json({
@@ -117,28 +144,20 @@ async function fixture(context, {
             case `/git/trees/${sha}`:
                 assert.equal(url.searchParams.get("recursive"), "1");
                 return Response.json({ tree, truncated: false });
-            case "/actions/secrets":
-                return Response.json({ total_count: repositoryKeys.length, secrets: repositoryKeys.map((name) => ({ name })) },
-                    { status: secretStatus });
-            case "/environments/appstore-connect/secrets":
-                return Response.json({ secrets: environmentKeys.map((name) => ({ name })) });
+            case "/environments/appstore-connect":
+                return Response.json({ deployment_branch_policy: { custom_branch_policies: policyEnabled, protected_branches: false } });
             case "/environments/appstore-connect/deployment-branch-policies":
                 return Response.json({ total_count: deploymentPolicies.length, branch_policies: deploymentPolicies });
-            case "/rulesets/11":
             case "/rulesets/12":
                 return Response.json({
                     target: "tag", enforcement: "active",
                     conditions: { ref_name: { include: [`refs/tags/${tagPrefix}*`, `refs/tags/${tagPrefix}*/**/*`], exclude: [] } },
-                    rules: (path.endsWith("11") ? ["creation"] : ["update", "deletion"]).map((type) => ({ type })),
+                    rules: [{ type: "update" }, { type: "deletion" }],
                     ...rulesetOverride,
-                });
-            case `/git/ref/tags/${tag}`:
-                return existingTag ? Response.json(existingTag) : new Response(null, { status: 404 });
-            case "/git/refs": {
-                assert.equal(request.method, "POST");
-                const data = JSON.parse(request.body);
-                tagWrites.push(data);
-                return Response.json({ ref: data.ref, object: { type: "commit", sha: data.sha } }, { status: 201 });
+                }, { status: rulesetStatus });
+            case `/git/ref/tags/${tag}`: {
+                const currentTag = await remoteTag();
+                return currentTag ? Response.json(currentTag) : new Response(null, { status: 404 });
             }
             default:
                 assert.fail(`Unexpected GitHub request ${path}`);
@@ -160,7 +179,12 @@ async function fixture(context, {
             }
             return Response.json({ data: workflow, included: [repo] });
         case "/v1/scmRepositories/repository-id/gitReferences":
-            if (branchMovesAfterTag) remoteHead = newerSha;
+            if (branchMovesDuringDiscovery) remoteHead = newerSha;
+            if (ciFailsDuringDiscovery) {
+                await writeFile(join(directory, "curl.response"), JSON.stringify({
+                    workflow_runs: [{ ...branchRun, conclusion: "failure" }],
+                }));
+            }
             if (!url.searchParams.has("page") && branch !== "main") {
                 return Response.json({
                     data: [{ id: "deleted", attributes: { canonicalName: tagRef, isDeleted: true } }],
@@ -177,8 +201,8 @@ async function fixture(context, {
                 ],
             });
         case "/v1/ciBuildRuns":
-            assert.deepEqual(tagWrites.length ? tagWrites.at(-1) : { ref: existingTag?.ref, sha: existingTag?.object?.sha },
-                { ref: tagRef, sha }, "Apple receives a tag pinned to the owner-supplied SHA");
+            assert.deepEqual(await remoteTag(), pinnedTag, "Apple receives a tag pinned to the owner-supplied SHA");
+            assert.ok((await readCalls("curl")).length, "CI is queried before the Apple POST");
             return Response.json({
                 data: { id: "build-id", attributes: { number: 42, sourceCommit: { commitSha: resolved } } },
             }, { status: 201 });
@@ -186,7 +210,7 @@ async function fixture(context, {
             assert.fail(`Unexpected API request ${url.pathname}`);
         }
     });
-    return { calls, refs, workflow, tagWrites, currentHead: () => remoteHead };
+    return { calls, refs, workflow, gitCalls: () => readCalls("git"), ciCalls: () => readCalls("curl") };
 }
 
 test("all-branch responses normalize only the empty match-all patterns", () => {
@@ -230,20 +254,25 @@ test("apply rejects a readback that still permits all branches", async (context)
     assert.deepEqual(calls.map(({ method }) => method), ["GET", "PATCH", "GET"]);
 });
 
-test("dispatch refuses the real all-branch condition before creating a tag", async (context) => {
-    const { calls, tagWrites } = await fixture(context, { manual: appleAnyBranch });
+test("dispatch refuses the real all-branch condition before starting Apple", async (context) => {
+    const { calls, gitCalls } = await fixture(context, { manual: appleAnyBranch, existingTag: pinnedTag });
     await assert.rejects(main("start", "main", sha), /Apply the Xcode Cloud configuration/);
     assert.deepEqual(calls.map(({ method }) => method), ["GET"]);
-    assert.deepEqual(tagWrites, []);
+    assert.deepEqual(await gitCalls(), []);
 });
 
 for (const branch of ["main", "feature/reminders"]) {
     test(`start checks CI and queues the owner's ${branch} SHA by its Apple tag ID`, async (context) => {
-        const { calls, refs, tagWrites, currentHead } = await fixture(context, { branch, branchMovesAfterTag: true });
+        const { calls, refs, gitCalls, ciCalls } = await fixture(context, { branch });
+        await main("tag", branch, sha);
+        assert.deepEqual(calls, [], "the write-token job never contacts Apple");
         await main("start", branch, sha);
-        assert.deepEqual(refs, [sha]);
-        assert.equal(currentHead(), newerSha);
-        assert.deepEqual(tagWrites, [{ ref: tagRef, sha }]);
+        assert.deepEqual(refs, [sha, sha, sha]);
+        assert.equal((await ciCalls()).length, 2);
+        assert.deepEqual(await gitCalls(), [
+            "fetch --no-tags --depth=1 " + remote + " refs/heads/" + branch,
+            "push --no-follow-tags --force-with-lease=" + tagRef + ": " + remote + " " + sha + ":" + tagRef,
+        ]);
         assert.deepEqual(calls.at(-1), {
             method: "POST",
             path: "/v1/ciBuildRuns",
@@ -272,86 +301,143 @@ test("an older branch or non-executable archive hook is rejected before contacti
     const tree = trustedTree.map((entry) =>
         entry.path === "ci_scripts/ci_post_clone.sh" ? { ...entry, mode: "100644" } : entry);
     const { calls } = await fixture(context, { branch, tree });
-    await assert.rejects(main("start", branch, sha), /must adopt ci_scripts\/ci_post_clone\.sh from main/);
+    await assert.rejects(main("tag", branch, sha), /must adopt ci_scripts\/ci_post_clone\.sh from main/);
     assert.deepEqual(calls, []);
 });
 
-for (const options of [{ ciConclusion: "failure" }, { missingCI: true }]) {
-    test(`${options.missingCI ? "missing" : "failed"} CI stops dispatch`, async (context) => {
+for (const [name, options] of [["failed", { ciConclusion: "failure" }], ["missing", { missingCI: true }],
+    ["different SHA", { ciSHA: newerSha }]]) {
+    test(`${name} CI stops tagging`, async (context) => {
         const branch = "feature/reminders";
-        const { calls, tagWrites } = await fixture(context, { branch, ...options });
-        await assert.rejects(main("start", branch, sha), /CI \(workflow_dispatch\) must pass on feature\/reminders/);
+        const { calls, gitCalls } = await fixture(context, { branch, ...options });
+        await assert.rejects(main("tag", branch, sha), /CI \(workflow_dispatch\) must pass on feature\/reminders/);
         assert.deepEqual(calls, []);
-        assert.deepEqual(tagWrites, []);
+        assert.deepEqual(await gitCalls(), []);
     });
 }
 
 test("a missing Apple tag cannot be replaced by a branch with the same name", async (context) => {
-    const { calls } = await fixture(context, { branch: "feature/reminders", tagVisible: false });
+    const { calls } = await fixture(context, { branch: "feature/reminders", tagVisible: false, existingTag: pinnedTag });
     await assert.rejects(main("start", "feature/reminders", sha), /cannot see the deployment tag/);
     assert.ok(calls.every(({ method }) => method === "GET"));
 });
 
 test("branch movement while GitHub is queued cannot select the new head", async (context) => {
-    const { calls, refs, tagWrites } = await fixture(context, { branch: "feature/reminders", head: newerSha });
-    await assert.rejects(main("start", "feature/reminders", sha), /is no longer at a{40}/);
+    const { calls, refs, gitCalls } = await fixture(context, { branch: "feature/reminders", head: newerSha });
+    await assert.rejects(main("tag", "feature/reminders", sha), /is no longer at a{40}/);
     assert.deepEqual(refs, [newerSha]);
     assert.deepEqual(calls, []);
-    assert.deepEqual(tagWrites, []);
+    assert.deepEqual(await gitCalls(), []);
+});
+
+test("branch movement between the GitHub read and fetch prevents the tag push", async (context) => {
+    const { calls, gitCalls } = await fixture(context, { fetchedHead: newerSha });
+    await assert.rejects(main("tag", "main", sha), /no longer at/);
+    assert.deepEqual(await gitCalls(), ["fetch --no-tags --depth=1 " + remote + " refs/heads/main"]);
+    assert.deepEqual(calls, []);
+});
+
+test("branch movement during Apple tag discovery stops even a retry", async (context) => {
+    const { calls, refs } = await fixture(context, { branchMovesDuringDiscovery: true, existingTag: pinnedTag });
+    await assert.rejects(main("start", "main", sha), /no longer at/);
+    assert.deepEqual(refs, [sha, newerSha]);
+    assert.deepEqual(calls.map(({ method }) => method), ["GET", "GET"]);
 });
 
 test("an existing exact tag can be retried when the queued SHA is not yet reported", async (context) => {
-    const { calls, tagWrites } = await fixture(context, { resolved: null,
-        existingTag: { ref: tagRef, object: { type: "commit", sha } },
-    });
+    const { calls, gitCalls, ciCalls } = await fixture(context, { resolved: null, existingTag: pinnedTag });
+    await main("tag", "main", sha);
     await main("start", "main", sha);
-    assert.deepEqual(tagWrites, []);
+    assert.deepEqual(await gitCalls(), []);
+    assert.equal((await ciCalls()).length, 2);
     assert.equal(calls.at(-1).method, "POST");
 });
 
 test("GitHub dispatch verifies current exact CI before reusing a protected tag", async (context) => {
     const branch = "feature/reminders";
-    const { calls, tagWrites } = await fixture(context, {
-        branch, ciConclusion: "failure",
-        existingTag: { ref: tagRef, object: { type: "commit", sha } },
-    });
+    const { calls, gitCalls, ciCalls } = await fixture(context, { branch, ciFailsDuringDiscovery: true, existingTag: pinnedTag });
+    await main("tag", branch, sha);
     await assert.rejects(main("start", branch, sha), /CI \(workflow_dispatch\) must pass on feature\/reminders/);
-    assert.deepEqual(calls, []);
-    assert.deepEqual(tagWrites, []);
+    assert.ok(calls.length > 0);
+    assert.ok(calls.every(({ method }) => method === "GET"));
+    assert.deepEqual(await gitCalls(), []);
+    assert.equal((await ciCalls()).length, 2);
 });
 
-test("an existing tag pointing at a different commit is never queued or rewritten", async (context) => {
-    const { calls, tagWrites } = await fixture(context, { existingTag: { ref: tagRef, object: { type: "commit", sha: newerSha } } });
-    await assert.rejects(main("start", "main", sha), /does not point directly/);
-    assert.deepEqual(tagWrites, []);
-    assert.deepEqual(calls.map(({ method }) => method), ["GET"]);
+for (const object of [{ type: "commit", sha: newerSha }, { type: "tag", sha }]) {
+    test(`an existing ${object.type} ref without a direct match is never queued or rewritten`, async (context) => {
+        const { calls, gitCalls } = await fixture(context, { existingTag: { ref: tagRef, object } });
+        await assert.rejects(main("tag", "main", sha), /does not point directly/);
+        await assert.rejects(main("start", "main", sha), /does not point directly/);
+        assert.deepEqual(await gitCalls(), []);
+        assert.deepEqual(calls, []);
+    });
+}
+
+test("a rejected tag push fails closed and is never retried as an update", async (context) => {
+    const { calls, gitCalls } = await fixture(context, { pushStatus: 1 });
+    await assert.rejects(main("tag", "main", sha), /git push/);
+    await assert.rejects(main("start", "main", sha), /GitHub does not have the deployment tag/);
+    assert.equal((await gitCalls()).filter((call) => call.startsWith("push ")).length, 1);
+    assert.deepEqual(calls, []);
 });
 
 test("Apple reporting a different commit identifies the build for investigation", async (context) => {
-    const { calls } = await fixture(context, { resolved: newerSha });
+    const { calls } = await fixture(context, { resolved: newerSha, existingTag: pinnedTag });
     await assert.rejects(main("start", "main", sha), /build build-id reported.*expected/);
     assert.equal(calls.filter(({ method }) => method === "POST").length, 1);
 });
 
 for (const [options, error] of [
-    [{ repositoryKeys: ["APP_STORE_CONNECT_PRIVATE_KEY"] }, /Remove .* repository secrets/],
-    [{ repositoryKeys: [privateKeyName] }, /Remove .* repository secrets/],
-    [{ environmentKeys: [appKeyName] }, /Store both private keys/],
-    [{ secretStatus: 403 }, /actions\/secrets.*failed \(HTTP 403\)/],
+    [{ rulesetStatus: 404 }, /rulesets\/12.*failed \(HTTP 404\)/],
+    [{ policyEnabled: false }, /environment to the main branch/],
     [{ deploymentPolicies: [{ name: "main", type: "tag" }] }, /environment to the main branch/],
-    [{ rulesetOverride: { enforcement: "disabled" } }, /must actively enforce creation/],
+    [{ rulesetOverride: { enforcement: "disabled" } }, /actively restrict updates and deletions/],
+    [{ rulesetOverride: { rules: [{ type: "update" }] } }, /actively restrict updates and deletions/],
+    [{ rulesetOverride: { rules: [{ type: "deletion" }] } }, /actively restrict updates and deletions/],
+    [{ rulesetOverride: { rules: [{ type: "creation" }, { type: "update" }, { type: "deletion" }] } }, /must allow tag creation/],
+    [{ rulesetOverride: { bypass_actors: [{ actor_type: "RepositoryRole" }] } }, /empty bypass list/],
     [{ rulesetOverride: { conditions: { ref_name: { include: [`refs/tags/${tagPrefix}*`], exclude: [] } } } },
         /full deployment tag namespace/],
 ]) {
     test(`deployment preflight fails closed for ${JSON.stringify(options)}`, async (context) => {
-        const { calls, tagWrites } = await fixture(context, options);
-        await assert.rejects(main("plan"), error);
+        const { calls, gitCalls } = await fixture(context, options);
         await assert.rejects(main("apply"), error);
+        await assert.rejects(main("tag", "main", sha), error);
         await assert.rejects(main("start", "main", sha), error);
         assert.deepEqual(calls, []);
-        assert.deepEqual(tagWrites, []);
+        assert.deepEqual(await gitCalls(), []);
     });
 }
+
+test("first-run plan prints setup gaps and local configuration with no ruleset or Apple key", async (context) => {
+    const { calls, gitCalls } = await fixture(context, { policyEnabled: false });
+    for (const name of ["APP_STORE_CONNECT_ENV_PRIVATE_KEY", "TESTFLIGHT_TAG_IMMUTABILITY_RULESET_ID"]) {
+        const value = process.env[name];
+        context.after(() => { process.env[name] = value; });
+        delete process.env[name];
+    }
+    const log = context.mock.method(console, "log", () => {});
+    await main("plan");
+    const output = log.mock.calls.flatMap(({ arguments: args }) => args).join("\n");
+    assert.match(output, /Restrict the appstore-connect environment to the main branch/);
+    assert.match(output, /Set the repository variable TESTFLIGHT_TAG_IMMUTABILITY_RULESET_ID/);
+    assert.match(output, /Set APP_STORE_CONNECT_ENV_PRIVATE_KEY/);
+    assert.match(output, /Desired Xcode Cloud configuration.*\n.*\n.*repository/);
+    assert.deepEqual(calls, []);
+    assert.deepEqual(await gitCalls(), []);
+});
+
+test("plan can preview Apple changes before the ruleset is configured", async (context) => {
+    const { calls, gitCalls } = await fixture(context, { rulesetStatus: 404, manual: appleAnyBranch });
+    const log = context.mock.method(console, "log", () => {});
+    await main("plan");
+    const output = log.mock.calls.flatMap(({ arguments: args }) => args).join("\n");
+    assert.match(output, /Setup required.*rulesets\/12/);
+    assert.match(output, /"manualBranchStartCondition": null/);
+    assert.deepEqual(calls.map(({ method }) => method), ["GET"]);
+    assert.deepEqual(await gitCalls(), []);
+});
 
 test("a legacy workflow is rejected before any write", async (context) => {
     const { calls } = await fixture(context, { workflowName: "TestFlight", manual: appleAnyBranch });
