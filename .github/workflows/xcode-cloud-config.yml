@@ -43,9 +43,8 @@ jobs:
         env:
           XCODE_CLOUD_OPERATION: ${{ inputs.operation }}
           GITHUB_TOKEN: ${{ github.token }}
-          TESTFLIGHT_TAG_IMMUTABILITY_RULESET_ID: ${{ vars.TESTFLIGHT_TAG_IMMUTABILITY_RULESET_ID }}
           XCODE_CLOUD_WORKFLOW_ID: ${{ vars.XCODE_CLOUD_WORKFLOW_ID }}
           APP_STORE_CONNECT_ISSUER_ID: ${{ vars.APP_STORE_CONNECT_ISSUER_ID }}
           APP_STORE_CONNECT_KEY_ID: ${{ vars.APP_STORE_CONNECT_KEY_ID }}
-          APP_STORE_CONNECT_ENV_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_ENV_PRIVATE_KEY }}
+          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_ENV_PRIVATE_KEY }}
         run: node Scripts/xcode-cloud.mjs "$XCODE_CLOUD_OPERATION"

@@ -12,7 +12,6 @@ git -C "$repository" add Makefile
 git -C "$repository" -c user.name=Test -c user.email=test@example.com \
     -c core.hooksPath=/dev/null -c commit.gpgsign=false commit -qm fixture
 sha=$(git -C "$repository" rev-parse HEAD)
-tag="punctual-testflight-v1-$sha"
 ln -s "$(command -v jq)" "$temporary/bin/jq"
 ln -s "$(command -v sh)" "$temporary/bin/sh"
 ln -s "$(command -v git)" "$temporary/bin/git"
@@ -58,7 +57,7 @@ chmod +x "$temporary"/bin/*
 run_hook() {
     PATH="$temporary/bin" CI_XCODE_CLOUD=TRUE CI_START_CONDITION=manual \
         CI_PRIMARY_REPOSITORY_PATH="$repository" CI_XCODEBUILD_ACTION=archive \
-        CI_COMMIT="$sha" CI_GIT_REF="refs/tags/$tag" CI_TAG="$tag" \
+        CI_COMMIT="$sha" CI_GIT_REF=refs/heads/feature/reminders CI_BRANCH=feature/reminders \
         ARCHIVE_CURL_CALLS="$temporary/archive-curl-calls" \
         EXPECTED_REPOSITORY="$repository" CALLS="$temporary/calls" SETUP_CALLS="$temporary/setup-calls" \
         /usr/bin/env "$@" /bin/sh "$root/ci_scripts/ci_post_clone.sh"
@@ -109,13 +108,8 @@ if run_ci main push API_STATUS=22; then
     echo 'Unexpected success for GitHub API failure.' >&2
     exit 1
 fi
-if run_hook CI_COMMIT=0123456789abcdef0123456789abcdef01234567 ||
-    run_hook CI_GIT_REF=refs/heads/feature/reminders CI_TAG= ||
-    run_hook CI_GIT_REF="refs/heads/$tag" ||
-    run_hook CI_GIT_REF=refs/tags/main CI_TAG=main ||
-    run_hook CI_GIT_REF=refs/tags/punctual-testflight-v1-garbage CI_TAG=punctual-testflight-v1-garbage ||
-    run_hook CI_GIT_REF= || run_hook CI_TAG=; then
-    echo 'Accepted a non-deployment ref or inconsistent Xcode Cloud metadata.' >&2
+if run_hook CI_COMMIT=0123456789abcdef0123456789abcdef01234567 || run_hook CI_COMMIT=; then
+    echo 'Accepted inconsistent Xcode Cloud checkout metadata.' >&2
     exit 1
 fi
 [ ! -e "$temporary/calls" ]
@@ -139,20 +133,21 @@ if run_ci "$branch" workflow_dispatch API_RESPONSE="$success"; then
     exit 1
 fi
 
-# Issued tags can start in Apple even when newer GitHub CI blocks new issuance.
+# Archive validation in Apple is independent of GitHub CI results.
 latest_failure=$(printf '%s\n' "$branch_success" | jq '
     .workflow_runs |= [(.[0] | .conclusion = "failure"), .[0]]')
 if run_ci "$branch" workflow_dispatch API_RESPONSE="$latest_failure"; then
-    echo 'Issued a tag despite a newer failing run for the same branch and SHA.' >&2
+    echo 'Accepted CI despite a newer failing run for the same branch and SHA.' >&2
     exit 1
 fi
 : > "$temporary/calls"
-run_hook CI_BRANCH='' API_RESPONSE="$latest_failure"
-run_hook CI_BRANCH='' API_STATUS=22
+run_hook API_RESPONSE="$latest_failure"
+run_hook CI_BRANCH='' CI_GIT_REF='' API_STATUS=22
 [ "$(cat "$temporary/calls")" = "$(printf '%s\n' validate-testflight validate-testflight)" ]
 [ ! -e "$temporary/archive-curl-calls" ]
 
-# A different checkout can have passing CI and still must fail the archive gate.
+# CI for configuration applies is still tied to the commit being checked.
+previous_sha=$sha
 git -C "$repository" -c user.name=Test -c user.email=test@example.com \
     -c core.hooksPath=/dev/null -c commit.gpgsign=false commit --allow-empty -qm 'new branch head'
 sha=$(git -C "$repository" rev-parse HEAD)
@@ -164,13 +159,12 @@ new_success=$(printf '%s\n' "$branch_success" | jq --arg sha "$sha" '.workflow_r
 run_ci "$branch" workflow_dispatch API_RESPONSE="$new_success"
 : > "$temporary/calls"
 : > "$temporary/setup-calls"
-if run_hook; then
-    echo 'Archived a different checkout with passing CI under the original deployment tag.' >&2
+if run_hook CI_COMMIT="$previous_sha"; then
+    echo 'Archived a checkout different from the commit reported by Xcode Cloud.' >&2
     exit 1
 fi
 [ ! -s "$temporary/calls" ]
 [ ! -s "$temporary/setup-calls" ]
-tag="punctual-testflight-v1-$sha"
 status=0
 run_hook MAKE_STATUS=33 || status=$?
 [ "$status" -eq 33 ]
